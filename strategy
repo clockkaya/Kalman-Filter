@@ -1,0 +1,274 @@
+import sys
+import numpy as np
+from pykalman import KalmanFilter
+
+def calculateLong(cash, bid):
+    return (0.5*cash)/bid # When we execute a call, we only take 50% of the cash in balance to buy the ETF as we are supposed to be risk adverser.
+
+def createNumTrades(path, tkr):
+
+	f = open(path+'numTrades_'+tkr+'.txt', 'w+')
+	f.write('0')
+	f.close()
+
+def readNumTrades(path, tkr_list, numTrades):
+
+	for tkr in tkr_list:
+		f = open(path+'numTrades_'+tkr+'.txt', 'r')
+		numTrades[tkr] = int(f.readline())
+		f.close()
+
+def updateNumTrades(path, tkr):
+
+	f = open(path+'numTrades_'+tkr+'.txt', 'r')
+	line = f.readline()
+	numTrades = int(line)
+	f.close()
+	f = open(path+'numTrades_'+tkr+'.txt', 'w')
+	f.write(str(numTrades+1))
+	f.close()
+
+def createflag(path):
+	f = open(path + 'flag' + '.txt', 'w+')
+	f.write('0')
+	f.close()
+
+def updateflag(path,flag):
+	f = open(path + 'flag' + '.txt', 'w+')
+	f.write(str(flag))
+	f.close()
+
+def convertFloat(string_litereal):
+	
+	if string_litereal.count('.') > 1:
+		str_list = string_litereal.split('.', 2)
+		return str_list[0]
+	else:
+		return string_litereal
+
+def get_kf(delta, prices):
+
+	# delta = 0.0001
+	trans_cov = delta/(1-delta)*np.eye(2)
+	obs_mat = np.vstack([prices, np.ones(prices.shape)]).T[:, np.newaxis]
+
+	kf = KalmanFilter(n_dim_obs=1, n_dim_state=2,
+		initial_state_mean=np.zeros(2),
+		initial_state_covariance=np.ones((2,2)),
+		transition_matrices=np.eye(2),
+		observation_matrices=obs_mat,
+		observation_covariance=1.0,
+		transition_covariance=trans_cov)
+
+	return kf
+
+tickers=['QQQ','SPY']
+frequency=60
+path='C:/Users/Kaya/Desktop/Trading/'
+
+nArg=int(sys.argv[1])
+
+i=1
+bid=dict()
+ask=dict()
+last=dict()
+qty=dict()
+for tkr in tickers:
+	i=i+1
+	bid[tkr]=float(sys.argv[i])
+	i=i+1
+	ask[tkr]=float(sys.argv[i])
+	i=i+1
+	last[tkr]=float(sys.argv[i])
+	qty[tkr]=list()
+	for j in range(nArg):
+		i=i+1
+		qty[tkr].append(float(sys.argv[i]))
+
+cCashQty=0
+cMarginQty=1
+cShortQty=2
+cCashAvailable=3
+cCVAP=4
+cTransCost=5
+
+returnString=dict()
+
+for i in tickers:
+
+	returnString[i] = 'blank' # test whether writing and reading data works
+
+tkr_files = dict()
+for i in tickers:
+	tkr_files[i] = open(path+i+'.txt', 'a+')
+
+	tkr_files[i].write(str(bid[i])+','+str(ask[i])+','+str(last[i])+'\n')
+
+	tkr_files[i].close()
+
+
+# Generate data to use:
+
+data = dict()
+tkr_files = dict()
+
+for i in tickers:
+
+	data[i] = dict()
+	data[i]['bid'] = []
+	data[i]['ask'] = []
+	data[i]['last'] = []
+
+	tkr_files[i] = open(path+i+'.txt', 'r')
+
+	lines = tkr_files[i].readlines()
+
+	if len(lines) <= 1:
+		createNumTrades(path, i)
+
+	for line in lines:
+
+		line_list = line.split(',')
+
+		data[i]['bid'].append(float(convertFloat(line_list[0])))
+		data[i]['ask'].append(float(convertFloat(line_list[1])))
+		data[i]['last'].append(float(convertFloat(line_list[2])))
+
+# Start strategy
+
+num_2 = 15 # We artificially set the window or the sample number as 15 points when applying Kalman filter alogrithm.
+
+num_2_list = dict()
+
+numTrades = dict()
+readNumTrades(path, tickers, numTrades)
+
+numShares = dict()
+
+numData = len(data[tickers[0]]['bid'])
+cashAvailable = qty[tickers[0]][cCashAvailable]
+
+delta = 0.0001
+
+try:
+	flag_file = open(path + 'flag' + '.txt', 'r')
+	line = flag_file.readline()
+	flag = int(line)
+	flag_file.close()
+except IOError:
+	createflag(path) # flag = 0: short position on spread , flag = 1: hold long position on spread
+	flag = 0
+    
+for i in range(len(tickers)):
+	num_2_list[tickers[i]] = []
+
+	if numData >= num_2:
+
+		for j in range(numData-num_2, numData):
+
+			num_2_list[tickers[i]].append(data[tickers[i]]['last'][j])
+
+		if i%2 == 1: # [i] = 'SPY' , [i-1] = 'QQQ'
+
+			kf = get_kf(delta, np.array(num_2_list[tickers[i-1]])) # input the noisy measurement variable 
+
+			state_means, state_covs = kf.filter(num_2_list[tickers[i]]) # update stage
+
+			y_hats = []            
+			for k in range(len(num_2_list[tickers[i-1]])):
+				y_hat = state_means[k,1] + state_means[k,0]*num_2_list[tickers[i-1]][k]
+				y_hats.append(y_hat) # now y hat is the model estimated value of SPY using QQQ as attribute variable
+
+			residuals = []
+			for l in range(len(y_hats)):
+				residual = num_2_list[tickers[i]][l]-y_hats[l]
+				residuals.append(residual) # we would exploit the stationary property of this process in our strategy design
+
+			residual_mean = np.mean(residuals)
+			residual_std = np.std(residuals)
+			current_price = last[tickers[i]]
+			current_residual = residuals[len(residuals)-1]
+			hedge_ratio = state_means[len(num_2_list[tickers[i-1]])-1,0]
+
+			if qty[tickers[i-1]][cCashQty]==0 and qty[tickers[i-1]][cShortQty]==0 and qty[tickers[i]][cCashQty]==0 and qty[tickers[i]][cShortQty]==0:
+ # Suppose we are standing at neither a long or short for both securities, the primary task is to enter the market. And the initial strategy we apply here is pretty straightforward and mediocre : buy low / sell high.
+
+				if current_residual < residual_mean - residual_std: # the residual now drops into an 'abnormal' zone which we can take advantage of
+
+					hedged_shares = calculateLong(cashAvailable, bid[tickers[i]])
+					numShares[tickers[i]] = hedged_shares
+					numShares[tickers[i-1]] = hedge_ratio * hedged_shares
+					returnString[tickers[i]] = "cashbuy/"+str(int(numShares[tickers[i]])) # in our predition, the price of SPY is going to climb
+					returnString[tickers[i-1]] = "shortsale/" + str(int(numShares[tickers[i-1]])) # whereas QQQ's price moves into the opposite direction
+					updateflag(path,1) # '1' stands for long spread
+
+				elif current_residual > residual_mean + residual_std: # Whatever the residual deviates the mean too high or low, it will revert to the mean in a long term. As a result, for the another situation of current_residual (current_residual > mean + sigma) , we only do all the same instructions as above except the direction.
+
+					hedging_shares = calculateLong(cashAvailable, bid[tickers[i-1]])
+					numShares[tickers[i-1]] = hedging_shares
+					numShares[tickers[i]] = hedging_shares / hedge_ratio
+					returnString[tickers[i]] = "shortsale/"+str(int(numShares[tickers[i]]))
+					returnString[tickers[i-1]] = "cashbuy/" + str(int(numShares[tickers[i-1]]))
+					updateflag(path,0) # '0' stands for short spread
+
+# Suppose either SPY or QQQ has some positions at this moment.
+			elif (flag == 1): # If Kalman filter alogrithm works as our expection, spread should be bellow mean.
+				if (current_residual > residual_mean) or (current_residual < residual_mean - 2 * residual_std):
+# The first condition indicates that we are going to make some profits whereas the second one shows that a severe loss is likely to happen. As we are doing high frequency trade, any profit within the small interval is valuable, so we would execute at once. Similarly, we wouldn't wait the loss to rebound. 
+					if (qty[tickers[i]][cCashQty] > 0):
+						returnString[tickers[i]] = "cashsell/" + str(int(qty[tickers[i]][cCashQty]))
+					if (qty[tickers[i - 1]][cCashQty] > 0):
+						returnString[tickers[i - 1]] = "cashsell/" + str(int(qty[tickers[i - 1]][cCashQty]))
+					if (qty[tickers[i]][cShortQty] > 0):
+						returnString[tickers[i]] = "shortcover/" + str(int(qty[tickers[i]][cShortQty]))
+					if (qty[tickers[i - 1]][cShortQty] > 0):
+						returnString[tickers[i - 1]] = "shortcover/" + str(int(qty[tickers[i - 1]][cShortQty]))
+					updateflag(path,-1)
+
+				if (current_residual > residual_mean + residual_std): # another speculative opportunity appears； which is equivalent to reenter the market as we have 'cleaned' our positions on both securities.
+					hedging_shares = calculateLong(cashAvailable, bid[tickers[i - 1]])
+					numShares[tickers[i - 1]] = hedging_shares
+					numShares[tickers[i]] = hedging_shares / hedge_ratio
+					returnString[tickers[i]] = "shortsale/" + str(int(numShares[tickers[i]]))
+					returnString[tickers[i - 1]] = "cashbuy/" + str(int(numShares[tickers[i - 1]]))
+					updateflag(path, 0) # short spread
+
+# The following codes are just to replicate the above strategy inversely. 
+			elif (flag == 0): # If Kalman filter alogrithm works as our expection, spread should be above mean.
+
+				if (current_residual < residual_mean or current_residual > residual_mean + 2 * residual_std):
+
+					if (qty[tickers[i]][cCashQty] > 0):
+						returnString[tickers[i]] = "cashsell/" + str(int(qty[tickers[i]][cCashQty]))
+					if (qty[tickers[i - 1]][cCashQty] > 0):
+						returnString[tickers[i - 1]] = "cashsell/" + str(int(qty[tickers[i - 1]][cCashQty]))
+					if (qty[tickers[i]][cShortQty] > 0):
+						returnString[tickers[i]] = "shortcover/" + str(int(qty[tickers[i]][cShortQty]))
+					if (qty[tickers[i - 1]][cShortQty] > 0):
+						returnString[tickers[i - 1]] = "shortcover/" + str(int(qty[tickers[i - 1]][cShortQty]))
+					updateflag(path,-1)
+
+				if (current_residual < residual_mean - residual_std):
+
+					hedged_shares = calculateLong(cashAvailable, bid[tickers[i]])
+					numShares[tickers[i]] = hedged_shares
+					numShares[tickers[i-1]] = hedge_ratio * hedged_shares
+					returnString[tickers[i]] = "cashbuy/"+str(int(numShares[tickers[i]]))
+					returnString[tickers[i-1]] = "shortsale/" + str(int(numShares[tickers[i-1]]))
+					updateflag(path,1) # long spread
+
+# The following instructions are made due to some limits of FTS plantform.
+			if qty[tickers[i]][cShortQty] > 10000 :
+				returnString[tickers[i]] = "shortcover/" + str(int(qty[tickers[i]][cShortQty] - 10000))
+			if qty[tickers[i - 1]][cShortQty] > 10000 :
+				returnString[tickers[i - 1]] = "shortcover/" + str(int(qty[tickers[i - 1]][cShortQty] - 10000))
+			if (qty[tickers[i]][cCashQty] > 10000):
+				returnString[tickers[i]] = "cashsell/" + str(int(qty[tickers[i]][cCashQty] - 10000))
+			if (qty[tickers[i - 1]][cCashQty] > 10000):
+				returnString[tickers[i - 1]] = "cashsell/" + str(int(qty[tickers[i - 1]][cCashQty] - 10000))
+
+	if returnString[tickers[i]] != "blank":
+		updateNumTrades(path,tickers[i])
+		updateNumTrades(path,tickers[i-1])
+
+print (returnString)
